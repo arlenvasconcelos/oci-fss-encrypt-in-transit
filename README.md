@@ -1,18 +1,24 @@
 # OCI File Storage Service
 # Criptografia TLS em Trânsito
-## Guia de Configuração e Validação para OKE
+## Guia de Configuração e Validação para OKE e VM Linux
 
 ---
 
 ## Visão Geral
 
-Este documento fornece instruções abrangentes para configurar e validar a criptografia TLS em trânsito entre pods do Oracle Container Engine for Kubernetes (OKE) e o Oracle Cloud Infrastructure (OCI) File Storage Service (FSS).
+Este documento fornece instruções abrangentes para configurar e validar a criptografia TLS em trânsito com o Oracle Cloud Infrastructure (OCI) File Storage Service (FSS).
 
-Quando configurado adequadamente, todos os dados transmitidos entre seus pods Kubernetes e o OCI File Storage são criptografados usando TLS, garantindo a segurança dos dados durante o trânsito.
+Este guia abrange dois cenários:
+- **OKE (Kubernetes):** Configuração para pods no Oracle Container Engine for Kubernetes
+- **VM Linux:** Configuração para máquinas virtuais Linux (Oracle Linux, etc.)
+
+Quando configurado adequadamente, todos os dados transmitidos são criptografados usando TLS, garantindo a segurança dos dados durante o trânsito.
 
 ---
 
-## Visão Geral da Arquitetura
+## Configuração para VM Windows
+
+### Visão Geral da Arquitetura (OKE)
 
 A arquitetura de criptografia TLS consiste nos seguintes componentes:
 
@@ -344,6 +350,216 @@ Se você não vê conexões para a porta 2051:
 
 ---
 
+## Configuração para VM Linux
+
+Esta seção descreve como configurar a criptografia TLS em trânsito para máquinas virtuais Linux (Oracle Linux 8+) que acessam o OCI File Storage Service.
+
+### Visão Geral da Arquitetura (VM Linux)
+
+```mermaid
+flowchart LR
+    subgraph vm["VM Linux"]
+        app["🔷 Aplicação"]
+        subgraph fssutils["oci-fss-utils"]
+            mounter["TLS Mounter<br/>Local"]
+        end
+    end
+
+    subgraph oci["OCI Cloud"]
+        fss["📦 File Storage<br/>Mount Target:2051"]
+    end
+
+    app -->|"NFS porta 2049<br/>🔓 Local"| mounter
+    mounter -->|"NFS porta 2051<br/>🔒 TLS Criptografado"| fss
+
+    style app fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#0d47a1
+    style mounter fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#e65100
+    style fss fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    style fssutils fill:#fff8e1,stroke:#ffa000,stroke-width:1px,color:#e65100
+    style vm fill:#fafafa,stroke:#616161,stroke-width:1px,color:#212121
+    style oci fill:#f1f8e9,stroke:#689f38,stroke-width:1px,color:#1b5e20
+```
+
+### Pré-requisitos (VM Linux)
+
+- VM com Oracle Linux 8 ou superior
+- Acesso root ou sudo
+- Conectividade de rede com o OCI File Storage mount target
+- Security lists configuradas para permitir tráfego nas portas 2048, 2049 e 2051
+
+---
+
+### Passo 1: Instalar o pacote oci-fss-utils
+
+O pacote `oci-fss-utils` é necessário para habilitar a criptografia TLS em trânsito.
+
+**Opção A: Instalação manual**
+
+```bash
+sudo dnf config-manager --enable ol8_developer
+sudo dnf install -y oci-fss-utils
+```
+
+**Opção B: Usando cloud-init (script de inicialização)**
+
+Configure o seguinte script de inicialização ao criar a VM:
+
+```bash
+#!/bin/bash
+
+dnf config-manager --enable ol8_developer
+dnf install -y oci-fss-utils
+
+touch /var/log/init.done
+```
+
+**Como configurar no OCI Console:**
+
+1. Navegue até **Compute** → **Instances** → **Create Instance**
+2. Em **Show advanced options** → **Management**
+3. Em **Cloud-init script**, cole o script acima
+4. Continue com a criação da instância
+
+**Verificar instalação:**
+
+```bash
+rpm -q oci-fss-utils
+```
+
+**Saída esperada:**
+```
+oci-fss-utils-<versão>.x86_64
+```
+
+### Passo 2: Criar o Ponto de Montagem
+
+Crie o diretório onde o sistema de arquivos será montado:
+
+```bash
+sudo mkdir -p /mnt/fss
+```
+
+### Passo 3: Montar o File Storage com Criptografia TLS
+
+Use o comando `mount` com o tipo `oci-fss` e a opção `fips` para habilitar a criptografia TLS:
+
+```bash
+sudo mount -t oci-fss -o fips <FQDN_MOUNT_TARGET>:<CAMINHO_EXPORT> /mnt/fss
+```
+
+**Exemplo:**
+```bash
+sudo mount -t oci-fss -o fips mttest.subedb0f8d96.fsstestecluster.oraclevcn.com:/FileSystem-20260203-1454-22 /mnt/fss
+```
+
+**Parâmetros:**
+
+| Parâmetro | Descrição |
+|-----------|-----------|
+| `-t oci-fss` | Tipo de sistema de arquivos OCI FSS com suporte a TLS |
+| `-o fips` | Habilita criptografia TLS (FIPS-compliant) |
+| `<FQDN_MOUNT_TARGET>` | Nome de domínio completo do mount target |
+| `<CAMINHO_EXPORT>` | Caminho do export (ex: /FileSystem-20260203-1454-22) |
+
+**Nota:** O OCID do filesystem não é necessário no comando mount para VMs, diferente da configuração no OKE.
+
+### Passo 4: Configurar Montagem Automática (Opcional)
+
+Para montar automaticamente o sistema de arquivos no boot, adicione uma entrada no `/etc/fstab`:
+
+```bash
+sudo sh -c 'echo "<FQDN_MOUNT_TARGET>:<CAMINHO_EXPORT> /mnt/fss oci-fss fips,_netdev 0 0" >> /etc/fstab'
+```
+
+**Exemplo:**
+```bash
+sudo sh -c 'echo "mttest.subedb0f8d96.fsstestecluster.oraclevcn.com:/FileSystem-20260203-1454-22 /mnt/fss oci-fss fips,_netdev 0 0" >> /etc/fstab'
+```
+
+**Nota:** A opção `_netdev` garante que a montagem seja adiada até que a rede esteja disponível.
+
+---
+
+### Validação (VM Linux)
+
+#### Verificar Montagem
+
+Confirme que o sistema de arquivos está montado:
+
+```bash
+mount | grep oci-fss
+```
+
+Ou:
+
+```bash
+df -h /mnt/fss
+```
+
+#### Testar Operações de Arquivo
+
+Verifique se as operações de arquivo funcionam corretamente:
+
+```bash
+sudo sh -c 'echo "teste-$(date +%s)" > /mnt/fss/teste.txt && cat /mnt/fss/teste.txt && rm /mnt/fss/teste.txt'
+```
+
+**Saída esperada:**
+```
+teste-1770145606
+```
+
+#### Verificar Conexões TLS Criptografadas
+
+**Este é o teste definitivo para confirmar que a criptografia TLS está ativa.**
+
+Verifique as conexões de rede nas portas 2049 e 2051:
+
+```bash
+ss -tan | grep -E '2049|2051'
+```
+
+**Saída esperada:**
+```
+ESTAB  0  0  10.0.10.50:xxxxx    10.0.10.73:2051
+```
+
+**✓ Indicador de Sucesso:** Se você vê conexões ESTABLISHED para a porta **2051**, a criptografia TLS está ativa!
+
+| Porta | Significado |
+|-------|-------------|
+| **2049** | Conexão NFS padrão (não criptografada) |
+| **2051** | Conexão NFS criptografada com TLS (**CRIPTOGRAFADO**) |
+
+---
+
+### Resolução de Problemas (VM Linux)
+
+#### Erro: mount: unknown filesystem type 'oci-fss'
+
+O pacote `oci-fss-utils` não está instalado. Execute:
+
+```bash
+sudo dnf config-manager --enable ol8_developer
+sudo dnf install -y oci-fss-utils
+```
+
+#### Erro: Connection refused ou timeout
+
+Verifique:
+- Conectividade de rede com o mount target
+- Security lists permitem tráfego nas portas 2048, 2049 e 2051
+- O mount target está ativo no OCI Console
+
+#### Sem conexões na porta 2051
+
+Se você não vê conexões para a porta 2051:
+- Verifique se usou `-o fips` no comando mount
+- Verifique as regras de firewall (firewalld, iptables)
+- Gere tráfego de I/O de arquivo e verifique as conexões novamente
+
+---
+
 ## Informações Adicionais
 
 ### Referência de Portas
@@ -371,10 +587,23 @@ Se você não vê conexões para a porta 2051:
 
 ## Resumo
 
-A criptografia TLS em trânsito para o OCI File Storage Service fornece uma camada adicional de segurança para seus dados. Seguindo este guia, você:
+A criptografia TLS em trânsito para o OCI File Storage Service fornece uma camada adicional de segurança para seus dados.
+
+### Para OKE (Kubernetes)
+
+Seguindo este guia, você:
 
 1. Configurou um PersistentVolume com `encryptInTransit: "true"`
 2. Implantou recursos Kubernetes para montar OCI FSS com criptografia TLS
 3. Verificou que o pod TLS mounter está lidando com criptografia de forma transparente
 4. Confirmou conexões TLS ativas na porta 2051 entre o forwarder e OCI FSS
 5. Testou operações de arquivo para garantir que a configuração está funcionando corretamente
+
+### Para VM Linux
+
+Seguindo este guia, você:
+
+1. Instalou o pacote `oci-fss-utils` na VM
+2. Montou o OCI FSS usando `mount -t oci-fss -o fips`
+3. Confirmou conexões TLS ativas na porta 2051
+4. Testou operações de arquivo para garantir que a configuração está funcionando corretamente
